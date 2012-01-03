@@ -51,12 +51,19 @@ the shared segment. This is a hard limit, the shared segment is not
 extensible and you need to set it so that all the dictionaries fit
 into it and not much memory is wasted.
 
-Set it higher than you need, load all the dictionaries and check the
-log - after loading each dictionary, there's a LOG message with info
-about how much memory is available. Use that to tweak the GUC.
+To find out how much memory you actually need, use a large value
+(e.g. 200MB) and load all the dictionaries you want to use. Then use
+the shared_ispell_mem_used() function to find out how much memory
+was actually used (and set the max_size GUC variable accordingly).
+
+Don't set it exactly to that value, leave there some free space,
+so that you can reload the dictionaries without changing the GUC
+max_size limit (which requires a restart of the DB). Ssomething
+like 512kB should be just fine.
 
 The shared segment can contain several dictionaries at the same time,
-the amount of memory is the only limit.
+the amount of memory is the only limit. There's no limit on number
+of dictionaries / words etc. Just the max_size GUC variable.
 
 
 Using the dictionary
@@ -84,3 +91,16 @@ and then do the usual stuff, e.g.
     SELECT ts_lexize('czech_shared', 'automobile');
 
 or whatever you want.
+
+
+Resetting the dictionary
+------------------------
+If you need to reset the dictionary (e.g. so that you can reload the
+updated files from disk), use shared_ispell_reset() function. Eveyone
+who already uses the dictionaries will be forced to reinitialize the
+data (first one will rebuild the dictionary in shared segment, the
+other ones will use this).
+
+    SELECT shared_ispell_reset();
+
+That's all for now ...

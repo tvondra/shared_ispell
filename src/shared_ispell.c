@@ -18,6 +18,7 @@
 #include "commands/defrem.h"
 #include "tsearch/ts_locale.h"
 #include "storage/lwlock.h"
+#include "utils/timestamp.h"
 
 #include "libpq/md5.h"
 
@@ -45,18 +46,40 @@ void		_PG_fini(void);
 
 /* used to allocate memory in the shared segment */
 typedef struct SegmentInfo {
+	
 	LWLockId	lock;
 	char		*firstfree;		/* first free address (always maxaligned) */
 	size_t		available;		/* free space remaining at firstfree */
+	Timestamp	lastReset;		/* last reset of the dictionary */
+	
 	/* the shared segment (info and data) */
 	SharedIspellDict * dict;
+	SharedStopList   * stop;
+	
 } SegmentInfo;
+
+#define MAXLEN 255
+
+/* used to keep track of dictionary in each backend */
+typedef struct DictInfo {
+
+	Timestamp	lookup;
+	
+	char dictFile[MAXLEN];
+	char affixFile[MAXLEN];
+	char stopFile[MAXLEN];
+
+	SharedIspellDict * dict;
+	SharedStopList   * stop;
+
+} DictInfo;
 
 /* These are used to allocate data within shared segment */
 static SegmentInfo * segment_info = NULL;
 
 static char * shalloc(int bytes);
-static void copyIspellDict(IspellDict * dict, SharedIspellDict * copy);
+static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
+static SharedStopList * copyStopList(StopList * list, char * stopFile);
 
 /*
  * Module load callback
@@ -145,6 +168,8 @@ void ispell_shmem_startup() {
 		segment_info->lock  = LWLockAssign();
 		segment_info->firstfree = segment + MAXALIGN(sizeof(SegmentInfo));
 		segment_info->available = max_ispell_mem_size - (int)(segment_info->firstfree - segment);
+		
+		segment_info->lastReset = GetCurrentTimestamp();
         
         elog(DEBUG1, "shared memory segment (shared ispell) successfully created");
         
@@ -160,7 +185,8 @@ SharedIspellDict * get_shared_dict(char * words, char * affixes) {
 	SharedIspellDict * dict = segment_info->dict;
 	
 	while (dict != NULL) {
-		if ((strcmp(dict->dictFile, words) == 0) && (strcmp(dict->affixFile, affixes) == 0)) {
+		if ((strcmp(dict->dictFile, words) == 0) &&
+			(strcmp(dict->affixFile, affixes) == 0)) {
 			return dict;
 		}
 		dict = dict->next;
@@ -169,13 +195,141 @@ SharedIspellDict * get_shared_dict(char * words, char * affixes) {
 	return NULL;
 }
 
+static
+SharedStopList * get_shared_stop_list(char * stop) {
+	
+	SharedStopList * list = segment_info->stop;
+	
+	while (list != NULL) {
+		if (strcmp(list->stopFile, stop) == 0) {
+			return list;
+		}
+		list = list->next;
+	}
+	
+	return NULL;
+}
+
+static
+void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * stopFile) {
+	
+	SharedIspellDict * shdict;
+	SharedStopList * shstop;
+	
+	IspellDict * dict;
+	StopList	stoplist;
+	
+	/* FIXME Maybe we could treat the stop file separately, as it does not
+	 * influence the dictionary. So the SharedIspellDict would track just
+	 * dictionary and affixes, and the stop words would be kept somewhere
+	 * else - either separately in the shared segment, or in local memory
+	 * (the list is usually small and easy pro load) */
+	shdict = get_shared_dict(dictFile, affFile);
+	
+	/* init if needed */
+	if (shdict == NULL) {
+		
+		dict = (IspellDict *)palloc0(sizeof(IspellDict));
+		
+		SharedNIStartBuild(dict);
+		
+		SharedNIImportDictionary(dict,
+						get_tsearch_config_filename(dictFile, "dict"));
+		
+		SharedNIImportAffixes(dict,
+						get_tsearch_config_filename(affFile, "affix"));
+		
+		SharedNISortDictionary(dict);
+		SharedNISortAffixes(dict);
+
+		SharedNIFinishBuild(dict);
+	
+		shdict = copyIspellDict(dict, dictFile, affFile);
+		
+		shdict->next = segment_info->dict;
+		segment_info->dict = shdict;
+		
+		elog(LOG, "shared ispell init done, remaining %d B", segment_info->available);
+		
+	}
+	
+	/* stop words */
+	shstop = get_shared_stop_list(stopFile);
+	if ((shstop == NULL) && (stopFile != NULL)) {
+		
+		readstoplist(stopFile, &stoplist, lowerstr);
+		shstop = copyStopList(&stoplist, stopFile);
+		
+		shstop->next = segment_info->stop;
+		segment_info->stop = shstop;
+		
+	}
+	
+	info->dict = shdict;
+	info->stop = shstop;
+	info->lookup = GetCurrentTimestamp();
+	
+	memcpy(info->dictFile, dictFile, strlen(dictFile) + 1);
+	memcpy(info->affixFile, dictFile, strlen(affFile)+ 1);
+	memcpy(info->stopFile, dictFile, strlen(stopFile) + 1);
+	
+}
+
 Datum dispell_init(PG_FUNCTION_ARGS);
 Datum dispell_lexize(PG_FUNCTION_ARGS);
+Datum dispell_reset(PG_FUNCTION_ARGS);
+Datum dispell_mem_available(PG_FUNCTION_ARGS);
+Datum dispell_mem_used(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(dispell_init);
 PG_FUNCTION_INFO_V1(dispell_lexize);
+PG_FUNCTION_INFO_V1(dispell_reset);
+PG_FUNCTION_INFO_V1(dispell_mem_available);
+PG_FUNCTION_INFO_V1(dispell_mem_used);
 
-StopList	stoplist;
+Datum
+dispell_reset(PG_FUNCTION_ARGS)
+{
+	LWLockAcquire(segment_info->lock, LW_EXCLUSIVE);
+	
+	segment_info->dict = NULL;
+	segment_info->stop = NULL;
+	segment_info->lastReset = GetCurrentTimestamp();
+	segment_info->firstfree = ((char*)segment_info) + MAXALIGN(sizeof(SegmentInfo));
+	segment_info->available = max_ispell_mem_size - (int)(segment_info->firstfree - (char*)segment_info);
+	
+	memset(segment_info->firstfree, 0, segment_info->available);
+	
+	LWLockRelease(segment_info->lock);
+	
+	PG_RETURN_VOID();
+}
+
+Datum
+dispell_mem_available(PG_FUNCTION_ARGS)
+{
+	int result = 0;
+	LWLockAcquire(segment_info->lock, LW_SHARED);
+	
+	result = segment_info->available;
+	
+	LWLockRelease(segment_info->lock);
+	
+	PG_RETURN_INT32(result);
+}
+
+Datum
+dispell_mem_used(PG_FUNCTION_ARGS)
+{
+	int result = 0;
+	LWLockAcquire(segment_info->lock, LW_SHARED);
+	
+	result = max_ispell_mem_size - segment_info->available;
+	
+	LWLockRelease(segment_info->lock);
+	
+	PG_RETURN_INT32(result);
+}
 
 Datum
 dispell_init(PG_FUNCTION_ARGS)
@@ -187,8 +341,8 @@ dispell_init(PG_FUNCTION_ARGS)
 				stoploaded = false;
 	ListCell   *l;
 	
-	IspellDict * dict;
-	SharedIspellDict * shdict;
+	/* this is the result passed to dispell_lexize */
+	DictInfo * info = (DictInfo *)palloc0(sizeof(DictInfo));
 
 	foreach(l, dictoptions)
 	{
@@ -229,73 +383,34 @@ dispell_init(PG_FUNCTION_ARGS)
 							defel->defname)));
 		}
 	}
+	
+	if (!affloaded)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("missing AffFile parameter")));
+	}
+	else if (! dictloaded)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("missing DictFile parameter")));
+	}
 
 	/* search if the dictionary is already initialized */
 	LWLockAcquire(segment_info->lock, LW_EXCLUSIVE);
 	
-	shdict = get_shared_dict(dictFile, affFile);
-	
-	/* init if needed */
-	if (shdict == NULL) {
-		
-		if (affloaded && dictloaded)
-		{
-			 dict = (IspellDict *)palloc(sizeof(IspellDict));
-		
-			SharedNIStartBuild(dict);
-			
-			SharedNIImportDictionary(dict,
-							get_tsearch_config_filename(dictFile, "dict"));
-			SharedNIImportAffixes(dict,
-							get_tsearch_config_filename(affFile, "affix"));
-			
-			/* FIXME use the stoplist */
-			/* readstoplist(stopFile, &stoplist, lowerstr); */
-			
-			SharedNISortDictionary(dict);
-			SharedNISortAffixes(dict);
-		}
-		else if (!affloaded)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("missing AffFile parameter")));
-		}
-		else
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					errmsg("missing DictFile parameter")));
-		}
-
-		SharedNIFinishBuild(dict);
-		
-		shdict = (SharedIspellDict*)shalloc(sizeof(SharedIspellDict));
-		
-		shdict->dictFile = shalloc(strlen(dictFile)+1);
-		shdict->affixFile = shalloc(strlen(affFile)+1);
-		
-		strcpy(shdict->dictFile, dictFile);
-		strcpy(shdict->affixFile, affFile);
-	
-		copyIspellDict(dict, shdict);
-		
-		shdict->next = segment_info->dict;
-		segment_info->dict = shdict;
-		
-		elog(LOG, "shared ispell init done, remaining %d B", segment_info->available);
-		
-	}
+	init_shared_dict(info, dictFile, affFile, stopFile);
 	
 	LWLockRelease(segment_info->lock);
 
-	PG_RETURN_POINTER(shdict);
+	PG_RETURN_POINTER(info);
 }
 
 Datum
 dispell_lexize(PG_FUNCTION_ARGS)
 {
-	SharedIspellDict *d = (SharedIspellDict *) PG_GETARG_POINTER(0);
+	DictInfo * info = (DictInfo *) PG_GETARG_POINTER(0);
 	char	   *in = (char *) PG_GETARG_POINTER(1);
 	int32		len = PG_GETARG_INT32(2);
 	char	   *txt;
@@ -307,15 +422,34 @@ dispell_lexize(PG_FUNCTION_ARGS)
 		PG_RETURN_POINTER(NULL);
 
 	txt = lowerstr_with_len(in, len);
-	res = SharedNINormalizeWord(d, txt);
 
-	if (res == NULL)
+	/* need to lock the segment in shared mode */
+	LWLockAcquire(segment_info->lock, LW_SHARED);
+	
+	/* do we need to reinit the dictionary? was the dict reset since the lookup */
+	if (timestamp_cmp_internal(info->lookup, segment_info->lastReset) < 0) {
+		
+		/* relock in exclusive mode */
+		LWLockRelease(segment_info->lock);
+		LWLockAcquire(segment_info->lock, LW_EXCLUSIVE);
+		
+		elog(INFO, "reinitializing shared dict (segment reset)");
+		
+		init_shared_dict(info, info->dictFile, info->affixFile, info->stopFile);
+	}
+	
+	res = SharedNINormalizeWord(info->dict, txt);
+
+	/* nothing found :-( */
+	if (res == NULL) {
+		LWLockRelease(segment_info->lock);
 		PG_RETURN_POINTER(NULL);
+	}
 
 	ptr = cptr = res;
 	while (ptr->lexeme)
 	{
-		if (searchstoplist(&stoplist, ptr->lexeme))
+		if (searchstoplist(&info->stop->list, ptr->lexeme))
 		{
 			pfree(ptr->lexeme);
 			ptr->lexeme = NULL;
@@ -329,6 +463,8 @@ dispell_lexize(PG_FUNCTION_ARGS)
 		}
 	}
 	cptr->lexeme = NULL;
+	
+	LWLockRelease(segment_info->lock);
 
 	PG_RETURN_POINTER(res);
 }
@@ -340,6 +476,8 @@ char * shalloc(int bytes) {
 	bytes = MAXALIGN(bytes);
 	
 	if (bytes > segment_info->available) {
+		/* FIXME this should not throw error, it should rather return NULL
+		 * and reset the alloc info (this way the memory is wasted forever) */
 		elog(ERROR, "the shared segment (shared ispell) is too small");
 	}
 	
@@ -446,9 +584,36 @@ AffixNode * copyAffixNode(AffixNode * node) {
 }
 
 static
-void copyIspellDict(IspellDict * dict, SharedIspellDict * copy) {
+SharedStopList * copyStopList(StopList * list, char * stopFile) {
 	
 	int i;
+	SharedStopList * copy = (SharedStopList *)shalloc(sizeof(SharedStopList));
+	
+	copy->list.len = list->len;
+	copy->list.stop = (char**)shalloc(sizeof(char*) * list->len);
+	copy->stopFile = (char*)shalloc(strlen(stopFile) + 1);
+	memcpy(copy->stopFile, stopFile, strlen(stopFile) + 1);
+	
+	for (i = 0; i < list->len; i++) {
+		copy->list.stop[i] = shalloc(strlen(list->stop[i]) + 1);
+		memcpy(copy->list.stop[i], list->stop[i], strlen(list->stop[i]) + 1);
+	}
+	
+	return copy;
+}
+
+static
+SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
+	
+	int i;
+
+	SharedIspellDict * copy = (SharedIspellDict*)shalloc(sizeof(SharedIspellDict));
+	
+	copy->dictFile = shalloc(strlen(dictFile)+1);
+	copy->affixFile = shalloc(strlen(affixFile)+1);
+	
+	strcpy(copy->dictFile, dictFile);
+	strcpy(copy->affixFile, affixFile);
 
 	copy->naffixes = dict->naffixes;
 	
@@ -475,5 +640,7 @@ void copyIspellDict(IspellDict * dict, SharedIspellDict * copy) {
 
 	memcpy(copy->flagval, dict->flagval, 255);
 	copy->usecompound = dict->usecompound;
+	
+	return copy;
 	
 }

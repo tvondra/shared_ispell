@@ -200,7 +200,19 @@ typedef struct SharedIspellDict
 	unsigned char flagval[256];
 	bool		usecompound;
 	
+	StopList * 	stopList;
+	
 } SharedIspellDict;
+
+typedef struct SharedStopList
+{
+	
+	char *  stopFile;
+	
+	StopList list;
+	struct SharedStopList * next;
+	
+} SharedStopList;
 
 TSLexeme *SharedNINormalizeWord(SharedIspellDict *Conf, char *word);
 

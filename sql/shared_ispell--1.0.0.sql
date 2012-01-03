@@ -1,18 +1,34 @@
-CREATE OR REPLACE FUNCTION shared_dispell_init(internal)
+CREATE OR REPLACE FUNCTION shared_ispell_init(internal)
 	RETURNS internal
 	AS 'MODULE_PATHNAME', 'dispell_init'
 	LANGUAGE C IMMUTABLE;
 
-CREATE OR REPLACE FUNCTION shared_dispell_lexize(internal,internal,internal,internal)
+CREATE OR REPLACE FUNCTION shared_ispell_lexize(internal,internal,internal,internal)
 	RETURNS internal
 	AS 'MODULE_PATHNAME', 'dispell_lexize'
 	LANGUAGE C IMMUTABLE;
 
+CREATE OR REPLACE FUNCTION shared_ispell_reset()
+	RETURNS void
+	AS 'MODULE_PATHNAME', 'dispell_reset'
+	LANGUAGE C IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION shared_ispell_mem_used()
+	RETURNS integer
+	AS 'MODULE_PATHNAME', 'dispell_mem_used'
+	LANGUAGE C IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION shared_ispell_mem_available()
+	RETURNS integer
+	AS 'MODULE_PATHNAME', 'dispell_mem_available'
+	LANGUAGE C IMMUTABLE;
+
 CREATE TEXT SEARCH TEMPLATE shared_ispell (
-    INIT = shared_dispell_init,
-    LEXIZE = shared_dispell_lexize
+    INIT = shared_ispell_init,
+    LEXIZE = shared_ispell_lexize
 );
 
+/*
 CREATE TEXT SEARCH DICTIONARY czech_shared (
 	TEMPLATE = shared_ispell,
 	DictFile = czech,
@@ -26,3 +42,4 @@ ALTER TEXT SEARCH CONFIGURATION czech_shared
     ALTER MAPPING FOR asciiword, asciihword, hword_asciipart,
                       word, hword, hword_part
     WITH czech_shared;
+*/
