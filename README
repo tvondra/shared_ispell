@@ -1,0 +1,84 @@
+Shared ISpell Dictionary
+========================
+This PostgreSQL extension provides a shared ispell dictionary, i.e.
+a dictionary that's stored in shared segment. The traditional ispell
+implementation means that each session initializes and stores the
+dictionary on it's own, which means a lot of CPU/RAM is wasted.
+
+This extension allocates an area in shared segment (you have to
+choose the size in advance) and then loads the dictionary into it
+when it's used for the first time.
+
+If you need just snowball-type dictionaries, this extension is not
+really interesting for you. But if you really need an ispell
+dictionary, this may save you a lot of resources.
+
+
+Install
+-------
+Installing the extension is quite simple, especially if you're on 9.1.
+In that case all you need to do is this:
+
+   $ make install
+
+and then (after connecting to the database)
+
+   db=# CREATE EXTENSION shared_ispell;
+
+If you're on pre-9.1 version, you'll have to do the second part manually
+by running the SQL script (shared_ispell--x.y.sql) in the database. If
+needed, replace MODULE_PATHNAME by $libdir.
+
+
+Config
+------
+No the functions are created, but you still need to load the shared
+module. This needs to be done from postgresql.conf, as the module
+needs to allocate space in the shared memory segment. So add this to
+the config file (or update the current values)
+
+   # libraries to load
+   shared_preload_libraries = 'shared_ispell'
+
+   # known GUC prefixes
+   custom_variable_classes = 'shared_ispell'
+
+   # config of the shared memory
+   shared_ispell.max_size = 30MB
+
+Yes, there's a single GUC variable that defines the maximum size of
+the shared segment. This is a hard limit, the shared segment is not
+extensible and you need to set it so that all the dictionaries fit
+into it and not much memory is wasted.
+
+Set it higher than you need, load all the dictionaries and check the
+log - after loading each dictionary, there's a LOG message with info
+about how much memory is available. Use that to tweak the GUC.
+
+The shared segment can contain seve
+
+Using the dictionary
+--------------------
+Technically, the extension defines a 'shared_ispell' template that
+you may use to define custom dictionaries. E.g. you may do this
+
+    CREATE TEXT SEARCH DICTIONARY czech_shared (
+        TEMPLATE = shared_ispell,
+        DictFile = czech,
+        AffFile = czech,
+        StopWords = czech
+    );
+
+    CREATE TEXT SEARCH CONFIGURATION public.czech_shared
+        ( COPY = pg_catalog.simple );
+
+    ALTER TEXT SEARCH CONFIGURATION czech_shared
+        ALTER MAPPING FOR asciiword, asciihword, hword_asciipart,
+                        word, hword, hword_part
+        WITH czech_shared;
+
+and then do the usual stuff, e.g.
+
+    SELECT ts_lexize('czech_shared', 'automobile');
+
+or whatever you want.
