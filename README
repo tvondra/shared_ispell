@@ -58,6 +58,7 @@ about how much memory is available. Use that to tweak the GUC.
 The shared segment can contain several dictionaries at the same time,
 the amount of memory is the only limit.
 
+
 Using the dictionary
 --------------------
 Technically, the extension defines a 'shared_ispell' template that

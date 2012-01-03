@@ -249,7 +249,8 @@ dispell_init(PG_FUNCTION_ARGS)
 			SharedNIImportAffixes(dict,
 							get_tsearch_config_filename(affFile, "affix"));
 			
-			// readstoplist(stopFile, &stoplist, lowerstr);
+			/* FIXME use the stoplist */
+			/* readstoplist(stopFile, &stoplist, lowerstr); */
 			
 			SharedNISortDictionary(dict);
 			SharedNISortAffixes(dict);
