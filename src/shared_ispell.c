@@ -544,8 +544,9 @@ AFFIX * copyAffix(AFFIX * affix) {
 	
 	if (copy->isregis) {
 		copy->reg.regis.node = copyRegisNode(copy->reg.regis.node);
-	} else {
+	} else if (! copy->issimple) {
 		// FIXME handle the regex_t properly (copy the strings etc)
+		elog(WARNING, "skipping regex_t");
 	}
 	
 	return copy;
@@ -563,14 +564,13 @@ AffixNode * copyAffixNode(AffixNode * node) {
 	}
 	
 	copy = (AffixNode *)shalloc(offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
-	copy->isvoid = node->isvoid;
-	copy->length = node->length;
 	memcpy(copy, node, offsetof(SPNode,data) + sizeof(SPNodeData) * node->length);
 	
 	for (i = 0; i < node->length; i++) {
 		
 		copy->data[i].node = copyAffixNode(node->data[i].node);
 		
+		copy->data[i].val = node->data[i].val;
 		copy->data[i].naff = node->data[i].naff;
 		copy->data[i].aff = (AFFIX**)shalloc(sizeof(AFFIX*) * node->data[i].naff);
 		memset(copy->data[i].aff, 0, sizeof(AFFIX*) * node->data[i].naff);
