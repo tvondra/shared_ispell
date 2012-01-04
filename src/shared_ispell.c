@@ -23,6 +23,7 @@
 #include "libpq/md5.h"
 
 #include "spell.h"
+#include "tsearch/dicts/spell.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -231,25 +232,25 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 		
 		dict = (IspellDict *)palloc0(sizeof(IspellDict));
 		
-		SharedNIStartBuild(dict);
+		NIStartBuild(dict);
 		
-		SharedNIImportDictionary(dict,
+		NIImportDictionary(dict,
 						get_tsearch_config_filename(dictFile, "dict"));
 		
-		SharedNIImportAffixes(dict,
+		NIImportAffixes(dict,
 						get_tsearch_config_filename(affFile, "affix"));
 		
-		SharedNISortDictionary(dict);
-		SharedNISortAffixes(dict);
+		NISortDictionary(dict);
+		NISortAffixes(dict);
 
-		SharedNIFinishBuild(dict);
+		NIFinishBuild(dict);
 	
 		shdict = copyIspellDict(dict, dictFile, affFile);
 		
 		shdict->next = segment_info->dict;
 		segment_info->dict = shdict;
 		
-		elog(LOG, "shared ispell init done, remaining %d B", segment_info->available);
+		elog(LOG, "shared ispell init done, remaining %ld B", segment_info->available);
 		
 	}
 	
@@ -603,9 +604,27 @@ SharedStopList * copyStopList(StopList * list, char * stopFile) {
 }
 
 static
+int countCMPDAffixes(CMPDAffix * affixes) {
+	
+	/* there's at least one affix */
+	int count = 1;
+	CMPDAffix * ptr = affixes;
+	
+	/* the last one is marked with (affix == NULL) */
+	while (ptr->affix)
+	{
+		ptr++;
+		count++;
+	}
+	
+	return count;
+	
+}
+
+static
 SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
 	
-	int i;
+	int i, cnt;
 
 	SharedIspellDict * copy = (SharedIspellDict*)shalloc(sizeof(SharedIspellDict));
 	
@@ -632,11 +651,10 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 		strcpy(copy->AffixData[i], dict->AffixData[i]);
 	}
 
-	/* copy compound affixes */
-	/* FIXME How to copy this without the cmpaffixes? If we can get rid of this field, we
-	 *       could get rid of the local IspellDict copy. */
-	copy->CompoundAffix = (CMPDAffix*)shalloc(sizeof(CMPDAffix) * dict->cmpaffixes);
-	memcpy(copy->CompoundAffix, dict->CompoundAffix, sizeof(CMPDAffix) * dict->cmpaffixes);
+	/* copy compound affixes (there's at least one) */
+	cnt = countCMPDAffixes(dict->CompoundAffix);
+	copy->CompoundAffix = (CMPDAffix*)shalloc(sizeof(CMPDAffix) * cnt);
+	memcpy(copy->CompoundAffix, dict->CompoundAffix, sizeof(CMPDAffix) * cnt);
 
 	memcpy(copy->flagval, dict->flagval, 255);
 	copy->usecompound = dict->usecompound;
