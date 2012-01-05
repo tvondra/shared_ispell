@@ -93,13 +93,45 @@ and then do the usual stuff, e.g.
 or whatever you want.
 
 
-Resetting the dictionary
-------------------------
-If you need to reset the dictionary (e.g. so that you can reload the
-updated files from disk), use shared_ispell_reset() function. Eveyone
-who already uses the dictionaries will be forced to reinitialize the
-data (first one will rebuild the dictionary in shared segment, the
-other ones will use this).
+Available functions
+-------------------
+The extension provides five management functions, that allow you to
+manage and get info about the preloaded dictionaries. The first two
+functions
+
+    shared_ispell_mem_used()
+    shared_ispell_mem_available()
+
+allow you to get info about the shared segment (used and free memory)
+e.g. to properly size the segment (max_size). Then there are functions
+return list of dictionaries / stop lists loaded in the shared segment
+
+    shared_ispell_dicts()
+    shared_ispell_stoplists()
+
+e.g. like this
+
+    SELECT * FROM shared_ispell_dicts();
+
+     dict_name | affix_name | words | affixes |  bytes   
+    -----------+------------+-------+---------+----------
+     bulgarian | bulgarian  | 79267 |      12 |  7622128
+     czech     | czech      | 96351 |    2544 | 12715000
+    (2 rows)
+
+
+    SELECT * FROM shared_ispell_stoplists();
+
+     stop_name | words | bytes 
+    -----------+-------+-------
+     czech     |   259 |  4552
+    (1 row)
+
+The last function allows you to reset the dictionary (e.g. so that you
+can reload the updated files from disk). The sessions that already use
+the dictionaries will be forced to reinitialize them (the first one
+will rebuild and copy them in the shared segment, the other ones will
+use this prepared data).
 
     SELECT shared_ispell_reset();
 
