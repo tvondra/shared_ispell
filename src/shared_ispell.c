@@ -29,6 +29,11 @@
 PG_MODULE_MAGIC;
 #endif
 
+#if (PG_VERSION_NUM < 90100)
+#define	NIStartBuild(dict)
+#define	NIFinishBuild(dict)
+#endif
+
 /* private functions */
 static void ispell_shmem_startup(void);
 
