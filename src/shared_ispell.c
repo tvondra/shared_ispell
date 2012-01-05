@@ -20,6 +20,8 @@
 #include "storage/lwlock.h"
 #include "utils/timestamp.h"
 
+#include "funcapi.h"
+
 #include "libpq/md5.h"
 
 #include "spell.h"
@@ -85,7 +87,7 @@ static SegmentInfo * segment_info = NULL;
 
 static char * shalloc(int bytes);
 
-static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int bytes);
+static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int bytes, int words);
 static SharedStopList * copyStopList(StopList * list, char * stopFile, int bytes);
 
 static int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
@@ -230,12 +232,8 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 	
 	IspellDict * dict;
 	StopList	stoplist;
-	
-	/* FIXME Maybe we could treat the stop file separately, as it does not
-	 * influence the dictionary. So the SharedIspellDict would track just
-	 * dictionary and affixes, and the stop words would be kept somewhere
-	 * else - either separately in the shared segment, or in local memory
-	 * (the list is usually small and easy pro load) */
+
+	/* dictionary (words and affixes) */
 	shdict = get_shared_dict(dictFile, affFile);
 	
 	/* init if needed */
@@ -264,7 +262,7 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 		}
 
 		/* fine, there's enough space - copy the dictionary */
-		shdict = copyIspellDict(dict, dictFile, affFile, size);
+		shdict = copyIspellDict(dict, dictFile, affFile, size, dict->nspell);
 		
 		elog(INFO, "shared dictionary %s.dict / %s.affix loaded, used %d B, %ld B remaining",
 				 dictFile, affFile, size, segment_info->available);
@@ -312,12 +310,16 @@ Datum dispell_lexize(PG_FUNCTION_ARGS);
 Datum dispell_reset(PG_FUNCTION_ARGS);
 Datum dispell_mem_available(PG_FUNCTION_ARGS);
 Datum dispell_mem_used(PG_FUNCTION_ARGS);
+Datum dispell_list_dicts(PG_FUNCTION_ARGS);
+Datum dispell_list_stoplists(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(dispell_init);
 PG_FUNCTION_INFO_V1(dispell_lexize);
 PG_FUNCTION_INFO_V1(dispell_reset);
 PG_FUNCTION_INFO_V1(dispell_mem_available);
 PG_FUNCTION_INFO_V1(dispell_mem_used);
+PG_FUNCTION_INFO_V1(dispell_list_dicts);
+PG_FUNCTION_INFO_V1(dispell_list_stoplists);
 
 Datum
 dispell_reset(PG_FUNCTION_ARGS)
@@ -507,9 +509,10 @@ char * shalloc(int bytes) {
 	char * result;
 	bytes = MAXALIGN(bytes);
 	
+	/* This shouldn't really happen, as the init_shared_dict checks the size
+	 * prior to copy. So let's just throw error here, as something went
+	 * obviously wrong. */
 	if (bytes > segment_info->available) {
-		/* FIXME this should not throw error, it should rather return NULL
-		 * and reset the alloc info (this way the memory is wasted forever) */
 		elog(ERROR, "the shared segment (shared ispell) is too small");
 	}
 	
@@ -596,6 +599,11 @@ int sizeRegisNode(RegisNode * node) {
 }
 
 static
+char * copyRegexGuts(char * guts) {
+	return NULL;
+}
+
+static
 AFFIX * copyAffix(AFFIX * affix) {
 
 	AFFIX * copy = (AFFIX*)shalloc(sizeof(AFFIX));
@@ -605,11 +613,14 @@ AFFIX * copyAffix(AFFIX * affix) {
 	copy->find = shstrcpy(affix->find);
 	copy->repl = shstrcpy(affix->repl);
 	
-	if (copy->isregis) {
-		copy->reg.regis.node = copyRegisNode(copy->reg.regis.node);
-	} else if (! copy->issimple) {
-		// FIXME handle the regex_t properly (copy the strings etc)
+	if (affix->isregis) {
+		copy->reg.regis.node = copyRegisNode(affix->reg.regis.node);
+	} else if (! affix->issimple) {
+		
+		/*FIXME Need to copy the regex_t properly. But would a plain copy be
+		 *      safe tu use by multiple processes at the same time? */
 		elog(WARNING, "skipping regex_t");
+		
 	}
 	
 	return copy;
@@ -627,8 +638,11 @@ int sizeAffix(AFFIX * affix) {
 	if (affix->isregis) {
 		size += sizeRegisNode(affix->reg.regis.node);
 	} else if (! affix->issimple) {
-		// FIXME handle the regex_t properly (copy the strings etc)
+		
+		/*FIXME Need to copy the regex_t properly. But would a plain copy be
+		 *      safe tu use by multiple processes at the same time? */
 		elog(WARNING, "skipping regex_t");
+		
 	}
 	
 	return size;
@@ -698,7 +712,7 @@ SharedStopList * copyStopList(StopList * list, char * stopFile, int size) {
 	copy->list.len = list->len;
 	copy->list.stop = (char**)shalloc(sizeof(char*) * list->len);
 	copy->stopFile = shstrcpy(stopFile);
-	copy->bytes = size;
+	copy->nbytes = size;
 	
 	for (i = 0; i < list->len; i++) {
 		copy->list.stop[i] = shstrcpy(list->stop[i]);
@@ -742,7 +756,7 @@ int countCMPDAffixes(CMPDAffix * affixes) {
 }
 
 static
-SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int size) {
+SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int size, int words) {
 	
 	int i, cnt;
 
@@ -778,7 +792,8 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 	memcpy(copy->flagval, dict->flagval, 255);
 	copy->usecompound = dict->usecompound;
 	
-	copy->bytes = size;
+	copy->nbytes = size;
+	copy->nwords = words;
 	
 	return copy;
 	
@@ -811,4 +826,187 @@ int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
 	
 	return size;
 	
+}
+
+Datum
+dispell_list_dicts(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	TupleDesc        tupdesc;
+	AttInMetadata   *attinmeta;
+	SharedIspellDict * dict;
+		
+	/* init on the first call */
+	if (SRF_IS_FIRSTCALL()) {
+		
+		MemoryContext oldcontext;
+		
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		
+		/* get a shared lock and then the first dictionary */
+		LWLockAcquire(segment_info->lock, LW_SHARED);
+		funcctx->user_fctx = segment_info->dict;
+		
+		/* Build a tuple descriptor for our result type */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context "
+							"that cannot accept type record")));
+
+		/*
+		 * generate attribute metadata needed later to produce tuples from raw
+		 * C strings
+		 */
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->attinmeta = attinmeta;
+		funcctx->tuple_desc = tupdesc;
+		
+		/* switch back to the old context */
+		MemoryContextSwitchTo(oldcontext);
+		
+	}
+	
+	/* init the context */
+	funcctx = SRF_PERCALL_SETUP();
+	
+	/* check if we have more data */
+	if (funcctx->user_fctx != NULL)
+	{
+		HeapTuple	tuple;
+		Datum		result;
+		Datum		values[5];
+		bool		nulls[5];
+		
+		text		*dictname, *affname;
+		
+		dict = (SharedIspellDict*)funcctx->user_fctx;
+		funcctx->user_fctx = dict->next;
+		
+		memset(nulls, 0, sizeof(nulls));
+		
+		dictname = (text *) palloc(strlen(dict->dictFile) + VARHDRSZ);
+		affname  = (text *) palloc(strlen(dict->affixFile) + VARHDRSZ);
+		
+		SET_VARSIZE(dictname, strlen(dict->dictFile) + VARHDRSZ);
+		SET_VARSIZE(affname,  strlen(dict->affixFile)  + VARHDRSZ);
+		
+		strcpy(VARDATA(dictname), dict->dictFile);
+		strcpy(VARDATA(affname),  dict->affixFile);
+		
+		values[0] = PointerGetDatum(dictname);
+		values[1] = PointerGetDatum(affname);
+		values[2] = UInt32GetDatum(dict->nwords);
+		values[3] = UInt32GetDatum(dict->naffixes);
+		values[4] = UInt32GetDatum(dict->nbytes);
+	   
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		
+		/* make the tuple into a datum */
+		result = HeapTupleGetDatum(tuple);
+
+		/* Here we want to return another item: */
+		SRF_RETURN_NEXT(funcctx, result);
+		
+	}
+	else
+	{
+		/* release the lock */
+		LWLockRelease(segment_info->lock);
+		
+		/* Here we are done returning items and just need to clean up: */
+		SRF_RETURN_DONE(funcctx);
+	}
+
+}
+
+Datum
+dispell_list_stoplists(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	TupleDesc        tupdesc;
+	AttInMetadata   *attinmeta;
+	SharedStopList  *stoplist;
+		
+	/* init on the first call */
+	if (SRF_IS_FIRSTCALL()) {
+		
+		MemoryContext oldcontext;
+		
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		
+		/* get a shared lock and then the first stop list */
+		LWLockAcquire(segment_info->lock, LW_SHARED);
+		funcctx->user_fctx = segment_info->stop;
+		
+		/* Build a tuple descriptor for our result type */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context "
+							"that cannot accept type record")));
+
+		/*
+		 * generate attribute metadata needed later to produce tuples from raw
+		 * C strings
+		 */
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		funcctx->attinmeta = attinmeta;
+		funcctx->tuple_desc = tupdesc;
+		
+		/* switch back to the old context */
+		MemoryContextSwitchTo(oldcontext);
+		
+	}
+	
+	/* init the context */
+	funcctx = SRF_PERCALL_SETUP();
+	
+	/* check if we have more data */
+	if (funcctx->user_fctx != NULL)
+	{
+		HeapTuple	tuple;
+		Datum		result;
+		Datum		values[3];
+		bool		nulls[3];
+		
+		text		*stopname;
+		
+		stoplist = (SharedStopList*)funcctx->user_fctx;
+		funcctx->user_fctx = stoplist->next;
+		
+		memset(nulls, 0, sizeof(nulls));
+		
+		stopname = (text *) palloc(strlen(stoplist->stopFile) + VARHDRSZ);
+		
+		SET_VARSIZE(stopname, strlen(stoplist->stopFile) + VARHDRSZ);
+		
+		strcpy(VARDATA(stopname), stoplist->stopFile);
+		
+		values[0] = PointerGetDatum(stopname);
+		values[1] = UInt32GetDatum(stoplist->list.len);
+		values[2] = UInt32GetDatum(stoplist->nbytes);
+	   
+		/* Build and return the tuple. */
+		tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		
+		/* make the tuple into a datum */
+		result = HeapTupleGetDatum(tuple);
+
+		/* Here we want to return another item: */
+		SRF_RETURN_NEXT(funcctx, result);
+		
+	}
+	else
+	{
+		/* release the lock */
+		LWLockRelease(segment_info->lock);
+		
+		/* Here we are done returning items and just need to clean up: */
+		SRF_RETURN_DONE(funcctx);
+	}
+
 }
