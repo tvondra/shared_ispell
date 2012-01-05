@@ -84,8 +84,12 @@ typedef struct DictInfo {
 static SegmentInfo * segment_info = NULL;
 
 static char * shalloc(int bytes);
+
 static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
 static SharedStopList * copyStopList(StopList * list, char * stopFile);
+
+static int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
+static int sizeStopList(StopList * list, char * stopFile);
 
 /*
  * Module load callback
@@ -219,6 +223,8 @@ SharedStopList * get_shared_stop_list(char * stop) {
 static
 void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * stopFile) {
 	
+	int size;
+	
 	SharedIspellDict * shdict;
 	SharedStopList * shstop;
 	
@@ -249,13 +255,22 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 		NISortAffixes(dict);
 
 		NIFinishBuild(dict);
-	
+
+		/* check available space in shared segment */
+		size = sizeIspellDict(dict, dictFile, affFile);
+		if (size > segment_info->available) {
+			elog(ERROR, "shared dictionary %s.dict / %s.affix needs %d B, only %ld B available",
+				 dictFile, affFile, size, segment_info->available);
+		}
+
+		/* fine, there's enough space - copy the dictionary */
 		shdict = copyIspellDict(dict, dictFile, affFile);
+		
+		elog(INFO, "shared dictionary %s.dict / %s.affix loaded, used %d B, %ld B remaining",
+				 dictFile, affFile, size, segment_info->available);
 		
 		shdict->next = segment_info->dict;
 		segment_info->dict = shdict;
-		
-		elog(LOG, "shared ispell init done, remaining %ld B", segment_info->available);
 		
 	}
 	
@@ -264,7 +279,18 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 	if ((shstop == NULL) && (stopFile != NULL)) {
 		
 		readstoplist(stopFile, &stoplist, lowerstr);
+		
+		size = sizeStopList(&stoplist, stopFile);
+		if (size > segment_info->available) {
+			elog(ERROR, "shared stoplist %s.stop needs %d B, only %ld B available",
+				 stopFile, size, segment_info->available);
+		}
+		
+		/* fine, there's enough space - copy the stoplist */
 		shstop = copyStopList(&stoplist, stopFile);
+		
+		elog(INFO, "shared stoplist %s.stop loaded, used %d B, %ld B remaining",
+				 affFile, size, segment_info->available);
 		
 		shstop->next = segment_info->stop;
 		segment_info->stop = shstop;
@@ -518,6 +544,25 @@ SPNode * copySPNode(SPNode * node) {
 }
 
 static
+int sizeSPNode(SPNode * node) {
+	
+	int i;
+	int size = 0;
+	
+	if (node == NULL) {
+		return 0;
+	}
+	
+	size = MAXALIGN(offsetof(SPNode,data) + sizeof(SPNodeData) * node->length);
+		
+	for (i = 0; i < node->length; i++) {
+		size += sizeSPNode(node->data[i].node);
+	}
+	
+	return size;
+}
+
+static
 char * shstrcpy(char * str) {
 	char * tmp = shalloc(strlen(str)+1);
 	memcpy(tmp, str, strlen(str)+1);
@@ -536,6 +581,18 @@ RegisNode * copyRegisNode(RegisNode * node) {
 	}
 
 	return copy;
+}
+
+static
+int sizeRegisNode(RegisNode * node) {
+	
+	int size = MAXALIGN(offsetof(RegisNode, data) + node->len);
+	
+	if (node->next != NULL) {
+		size += sizeRegisNode(node->next);
+	}
+
+	return size;
 }
 
 static
@@ -560,6 +617,25 @@ AFFIX * copyAffix(AFFIX * affix) {
 }
 
 static
+int sizeAffix(AFFIX * affix) {
+
+	int size = MAXALIGN(sizeof(AFFIX));
+	
+	size += MAXALIGN(strlen(affix->find)+1);
+	size += MAXALIGN(strlen(affix->repl)+1);
+	
+	if (affix->isregis) {
+		size += sizeRegisNode(affix->reg.regis.node);
+	} else if (! affix->issimple) {
+		// FIXME handle the regex_t properly (copy the strings etc)
+		elog(WARNING, "skipping regex_t");
+	}
+	
+	return size;
+
+}
+
+static
 AffixNode * copyAffixNode(AffixNode * node) {
 	
 	int i, j;
@@ -570,7 +646,7 @@ AffixNode * copyAffixNode(AffixNode * node) {
 	}
 	
 	copy = (AffixNode *)shalloc(offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
-	memcpy(copy, node, offsetof(SPNode,data) + sizeof(SPNodeData) * node->length);
+	memcpy(copy, node, offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
 	
 	for (i = 0; i < node->length; i++) {
 		
@@ -579,7 +655,6 @@ AffixNode * copyAffixNode(AffixNode * node) {
 		copy->data[i].val = node->data[i].val;
 		copy->data[i].naff = node->data[i].naff;
 		copy->data[i].aff = (AFFIX**)shalloc(sizeof(AFFIX*) * node->data[i].naff);
-		memset(copy->data[i].aff, 0, sizeof(AFFIX*) * node->data[i].naff);
 					
 		for (j = 0; j < node->data[i].naff; j++) {
 			copy->data[i].aff[j] = copyAffix(node->data[i].aff[j]);
@@ -587,6 +662,31 @@ AffixNode * copyAffixNode(AffixNode * node) {
 	}
 	
 	return copy;
+}
+
+static
+int sizeAffixNode(AffixNode * node) {
+	
+	int i, j;
+	int size = 0;
+	
+	if (node == NULL) {
+		return 0;
+	}
+	
+	size = MAXALIGN(offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
+	
+	for (i = 0; i < node->length; i++) {
+		
+		size += sizeAffixNode(node->data[i].node);
+		size += MAXALIGN(sizeof(AFFIX*) * node->data[i].naff);
+					
+		for (j = 0; j < node->data[i].naff; j++) {
+			size += sizeAffix(node->data[i].aff[j]);
+		}
+	}
+	
+	return size;
 }
 
 static
@@ -606,6 +706,22 @@ SharedStopList * copyStopList(StopList * list, char * stopFile) {
 	}
 	
 	return copy;
+}
+
+static
+int sizeStopList(StopList * list, char * stopFile) {
+	
+	int i;
+	int size = MAXALIGN(sizeof(SharedStopList));
+	
+	size += MAXALIGN(sizeof(char*) * list->len);
+	size += MAXALIGN(strlen(stopFile) + 1);
+	
+	for (i = 0; i < list->len; i++) {
+		size += MAXALIGN(strlen(list->stop[i]) + 1);
+	}
+	
+	return size;
 }
 
 static
@@ -652,8 +768,7 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 	copy->nAffixData = dict->nAffixData;	
 	copy->AffixData = (char**)shalloc(sizeof(char*) * dict->nAffixData);
 	for (i = 0; i < copy->nAffixData; i++) {
-		copy->AffixData[i] = (char*)shalloc(sizeof(char) * strlen(dict->AffixData[i]) + 1);
-		strcpy(copy->AffixData[i], dict->AffixData[i]);
+		copy->AffixData[i] = shstrcpy(dict->AffixData[i]);
 	}
 
 	/* copy compound affixes (there's at least one) */
@@ -665,5 +780,34 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 	copy->usecompound = dict->usecompound;
 	
 	return copy;
+	
+}
+
+static
+int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
+	
+	int i;
+	int size = MAXALIGN(sizeof(SharedIspellDict));
+	
+	size += MAXALIGN(strlen(dictFile)+1);
+	size += MAXALIGN(strlen(affixFile)+1);
+	
+	size += MAXALIGN(sizeof(AFFIX) * dict->naffixes);
+	
+	size += MAXALIGN(sizeAffixNode(dict->Suffix));
+	size += MAXALIGN(sizeAffixNode(dict->Prefix));
+	
+	size += sizeSPNode(dict->Dictionary);
+	
+	/* copy affix data */
+	size += MAXALIGN(sizeof(char*) * dict->nAffixData);
+	for (i = 0; i < dict->nAffixData; i++) {
+		size += MAXALIGN(sizeof(char) * strlen(dict->AffixData[i]) + 1);
+	}
+	
+	/* copy compound affixes (there's at least one) */
+	size += MAXALIGN(sizeof(CMPDAffix) * countCMPDAffixes(dict->CompoundAffix));
+	
+	return size;
 	
 }
