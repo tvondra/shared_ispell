@@ -85,8 +85,8 @@ static SegmentInfo * segment_info = NULL;
 
 static char * shalloc(int bytes);
 
-static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
-static SharedStopList * copyStopList(StopList * list, char * stopFile);
+static SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int bytes);
+static SharedStopList * copyStopList(StopList * list, char * stopFile, int bytes);
 
 static int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile);
 static int sizeStopList(StopList * list, char * stopFile);
@@ -264,7 +264,7 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 		}
 
 		/* fine, there's enough space - copy the dictionary */
-		shdict = copyIspellDict(dict, dictFile, affFile);
+		shdict = copyIspellDict(dict, dictFile, affFile, size);
 		
 		elog(INFO, "shared dictionary %s.dict / %s.affix loaded, used %d B, %ld B remaining",
 				 dictFile, affFile, size, segment_info->available);
@@ -287,7 +287,7 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 		}
 		
 		/* fine, there's enough space - copy the stoplist */
-		shstop = copyStopList(&stoplist, stopFile);
+		shstop = copyStopList(&stoplist, stopFile, size);
 		
 		elog(INFO, "shared stoplist %s.stop loaded, used %d B, %ld B remaining",
 				 affFile, size, segment_info->available);
@@ -690,19 +690,18 @@ int sizeAffixNode(AffixNode * node) {
 }
 
 static
-SharedStopList * copyStopList(StopList * list, char * stopFile) {
+SharedStopList * copyStopList(StopList * list, char * stopFile, int size) {
 	
 	int i;
 	SharedStopList * copy = (SharedStopList *)shalloc(sizeof(SharedStopList));
 	
 	copy->list.len = list->len;
 	copy->list.stop = (char**)shalloc(sizeof(char*) * list->len);
-	copy->stopFile = (char*)shalloc(strlen(stopFile) + 1);
-	memcpy(copy->stopFile, stopFile, strlen(stopFile) + 1);
+	copy->stopFile = shstrcpy(stopFile);
+	copy->bytes = size;
 	
 	for (i = 0; i < list->len; i++) {
-		copy->list.stop[i] = shalloc(strlen(list->stop[i]) + 1);
-		memcpy(copy->list.stop[i], list->stop[i], strlen(list->stop[i]) + 1);
+		copy->list.stop[i] = shstrcpy(list->stop[i]);
 	}
 	
 	return copy;
@@ -743,7 +742,7 @@ int countCMPDAffixes(CMPDAffix * affixes) {
 }
 
 static
-SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
+SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * affixFile, int size) {
 	
 	int i, cnt;
 
@@ -778,6 +777,8 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 
 	memcpy(copy->flagval, dict->flagval, 255);
 	copy->usecompound = dict->usecompound;
+	
+	copy->bytes = size;
 	
 	return copy;
 	

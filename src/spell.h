@@ -27,6 +27,8 @@ typedef struct SharedIspellDict
 	char *	dictFile;
 	char *  affixFile;
 	
+	size_t	bytes;
+	
 	/* next dictionary in the chain */
 	struct SharedIspellDict * next;
 	
@@ -53,6 +55,8 @@ typedef struct SharedStopList
 {
 	
 	char *  stopFile;
+	
+	size_t	bytes;
 	
 	StopList list;
 	struct SharedStopList * next;
