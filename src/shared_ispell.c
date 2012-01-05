@@ -619,7 +619,7 @@ AFFIX * copyAffix(AFFIX * affix) {
 		
 		/*FIXME Need to copy the regex_t properly. But would a plain copy be
 		 *      safe tu use by multiple processes at the same time? */
-		elog(WARNING, "skipping regex_t");
+		elog(ERROR, "This extension can't handle regex_t affixes yet.");
 		
 	}
 	
@@ -641,7 +641,7 @@ int sizeAffix(AFFIX * affix) {
 		
 		/*FIXME Need to copy the regex_t properly. But would a plain copy be
 		 *      safe tu use by multiple processes at the same time? */
-		elog(WARNING, "skipping regex_t");
+		elog(ERROR, "This extension can't handle regex_t affixes yet.");
 		
 	}
 	
