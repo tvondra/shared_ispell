@@ -8,7 +8,7 @@
    "prereqs": {
       "runtime": {
          "requires": {
-            "PostgreSQL": "9.0.0"
+            "PostgreSQL": "8.4.0"
          }
       }
    },
