@@ -19,11 +19,11 @@ Install
 Installing the extension is quite simple, especially if you're on 9.1.
 In that case all you need to do is this:
 
-   $ make install
+    $ make install
 
 and then (after connecting to the database)
 
-   db=# CREATE EXTENSION shared_ispell;
+    db=# CREATE EXTENSION shared_ispell;
 
 If you're on pre-9.1 version, you'll have to do the second part manually
 by running the SQL script (shared_ispell--x.y.sql) in the database. If
@@ -37,14 +37,14 @@ module. This needs to be done from postgresql.conf, as the module
 needs to allocate space in the shared memory segment. So add this to
 the config file (or update the current values)
 
-   # libraries to load
-   shared_preload_libraries = 'shared_ispell'
+    # libraries to load`
+    shared_preload_libraries = 'shared_ispell'`
 
-   # known GUC prefixes
-   custom_variable_classes = 'shared_ispell'
+    # known GUC prefixes
+    custom_variable_classes = 'shared_ispell'
 
-   # config of the shared memory
-   shared_ispell.max_size = 30MB
+    # config of the shared memory
+    shared_ispell.max_size = 30MB
 
 Yes, there's a single GUC variable that defines the maximum size of
 the shared segment. This is a hard limit, the shared segment is not
@@ -88,7 +88,7 @@ you may use to define custom dictionaries. E.g. you may do this
 
 and then do the usual stuff, e.g.
 
-    SELECT ts_lexize('czech_shared', 'automobile');
+    db=# SELECT ts_lexize('czech_shared', 'automobile');
 
 or whatever you want.
 
@@ -111,7 +111,7 @@ return list of dictionaries / stop lists loaded in the shared segment
 
 e.g. like this
 
-    SELECT * FROM shared_ispell_dicts();
+    db=# SELECT * FROM shared_ispell_dicts();
 
      dict_name | affix_name | words | affixes |  bytes   
     -----------+------------+-------+---------+----------
@@ -120,7 +120,7 @@ e.g. like this
     (2 rows)
 
 
-    SELECT * FROM shared_ispell_stoplists();
+    db=# SELECT * FROM shared_ispell_stoplists();
 
      stop_name | words | bytes 
     -----------+-------+-------
@@ -133,6 +133,6 @@ the dictionaries will be forced to reinitialize them (the first one
 will rebuild and copy them in the shared segment, the other ones will
 use this prepared data).
 
-    SELECT shared_ispell_reset();
+    db=# SELECT shared_ispell_reset();
 
 That's all for now ...
