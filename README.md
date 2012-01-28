@@ -46,8 +46,8 @@ module. This needs to be done from postgresql.conf, as the module
 needs to allocate space in the shared memory segment. So add this to
 the config file (or update the current values)
 
-    # libraries to load`
-    shared_preload_libraries = 'shared_ispell'`
+    # libraries to load
+    shared_preload_libraries = 'shared_ispell'
 
     # known GUC prefixes
     custom_variable_classes = 'shared_ispell'
