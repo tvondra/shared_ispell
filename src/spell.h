@@ -30,7 +30,7 @@ typedef struct SharedIspellDict
 	int		nbytes;
 	int		nwords;
 	
-	/* next dictionary in the chain */
+	/* next dictionary in the chain (essentially a linked list) */
 	struct SharedIspellDict * next;
 	
 	/* the copied fields */
@@ -41,9 +41,11 @@ typedef struct SharedIspellDict
 	AffixNode  *Prefix;
 
 	SPNode	   *Dictionary;
-	char	  **AffixData;
-	int			lenAffixData;
-	int			nAffixData;
+	char	  **AffixData;		/* list of flags (characters) used in the dictionary */
+	
+	/* FIXME lenAffixData and nAffixData seems to be the same thing */
+	int			lenAffixData;	/* length of the affix array */
+	int			nAffixData;		/* number of affix data items */
 
 	CMPDAffix  * CompoundAffix;
 

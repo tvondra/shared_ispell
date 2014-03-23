@@ -53,7 +53,7 @@ the config file (or update the current values)
     custom_variable_classes = 'shared_ispell'
 
     # config of the shared memory
-    shared_ispell.max_size = 30MB
+    shared_ispell.max_size = 32MB
 
 Yes, there's a single GUC variable that defines the maximum size of
 the shared segment. This is a hard limit, the shared segment is not

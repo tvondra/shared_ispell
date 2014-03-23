@@ -2,7 +2,9 @@
  *
  * spell.c
  * 
- * Normalizing word with ISpell (in shared segment)
+ * Normalizing word with ISpell (in shared segment). Mostly a slightly
+ * copy of the spell.c code, modified so that it works with SharedIspellDict
+ * instead of plain IspellDict.
  *
  * Portions Copyright (c) 1996-2011, PostgreSQL Global Development Group
  * Copyright (c) 2011, Tomas Vondra
