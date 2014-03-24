@@ -26,7 +26,7 @@
  * 
  * dispell_init
  *      -> init_shared_dict
- *          -> get_shared_dict
+ *          -> get_shared_dict (not found)
  *              -> NIStartBuild
  *              -> NIImportDictionary
  *              -> NIImportAffixes
@@ -35,11 +35,16 @@
  *              -> NIFinishBuild
  *              -> sizeIspellDict
  *              -> copyIspellDict
- *                  -> copyAffixNode (prefixes)
- *                  -> copyAffixNode (suffixes)
  *                  -> copySPNode
  *                  -> copy affix data
  *                  -> copy compound affixes
+ * 
+ *          -> get_shared_dict (found -> reload affixes)
+ *              -> NIStartBuild
+ *              -> NIImportAffixes
+ *              -> NISortAffixes
+ *              -> NIFinishBuild
+ * 
  *          -> get_shared_stop_list
  *              -> readstoplist
  *              -> copyStopList
@@ -361,6 +366,28 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
         /* add the new dictionary to the linked list (of SharedIspellDict structures) */
         shdict->next = segment_info->dict;
         segment_info->dict = shdict;
+
+    } else {
+        
+        /* we got the dictionary, but we need to reload the affixes (to handle regex_t rules) */
+
+        dict = (IspellDict *)palloc0(sizeof(IspellDict));
+
+        NIStartBuild(dict);
+
+        NIImportAffixes(dict,
+                        get_tsearch_config_filename(affFile, "affix"));
+        
+        dict->AffixData = shdict->AffixData;
+        dict->lenAffixData = shdict->lenAffixData;
+        dict->nAffixData = shdict->nAffixData;
+        
+        NISortAffixes(dict);
+
+        NIFinishBuild(dict);
+        
+        shdict->Suffix = dict->Suffix;
+        shdict->Prefix = dict->Prefix;
 
     }
     
@@ -723,139 +750,6 @@ int sizeSPNode(SPNode * node) {
     return size;
 }
 
-/* RegisNode - simple regular expressions */
-
-static
-RegisNode * copyRegisNode(RegisNode * node) {
-
-    RegisNode * copy = (RegisNode *)shalloc(offsetof(RegisNode, data) + node->len);
-
-    memcpy(copy, node, offsetof(RegisNode, data) + node->len);
-
-    if (node->next != NULL) {
-        copy->next = copyRegisNode(node->next);
-    }
-
-    return copy;
-}
-
-static
-int sizeRegisNode(RegisNode * node) {
-
-    int size = MAXALIGN(offsetof(RegisNode, data) + node->len);
-
-    if (node->next != NULL) {
-        size += sizeRegisNode(node->next);
-    }
-
-    return size;
-}
-
-/* AFFIX - affix rules (simple, regis or full regular expressions). */
-
-static
-AFFIX * copyAffix(AFFIX * affix) {
-
-    AFFIX * copy = (AFFIX*)shalloc(sizeof(AFFIX));
-
-    memcpy(copy, affix, sizeof(AFFIX));
-
-    copy->find = shstrcpy(affix->find);
-    copy->repl = shstrcpy(affix->repl);
-
-    if (affix->isregis) {
-        copy->reg.regis.node = copyRegisNode(affix->reg.regis.node);
-    } else if (! affix->issimple) {
-
-        /*FIXME Need to copy the regex_t properly. But a plain copy would not be
-         *      safe tu use by multiple processes at the same time, so each backend
-         *      needs to create it's own copy. */
-        elog(ERROR, "This extension can't handle regex_t affixes yet.");
-
-    }
-
-    return copy;
-
-}
-
-static
-int sizeAffix(AFFIX * affix) {
-
-    int size = MAXALIGN(sizeof(AFFIX));
-
-    size += MAXALIGN(strlen(affix->find)+1);
-    size += MAXALIGN(strlen(affix->repl)+1);
-
-    if (affix->isregis) {
-        size += sizeRegisNode(affix->reg.regis.node);
-    } else if (! affix->issimple) {
-
-        /*FIXME Need to copy the regex_t properly. But would a plain copy be
-         *      safe tu use by multiple processes at the same time? */
-        elog(ERROR, "This extension can't handle regex_t affixes yet.");
-
-    }
-
-    return size;
-
-}
-
-/* AffixNode */
-
-static
-AffixNode * copyAffixNode(AffixNode * node) {
-
-    int i, j;
-    AffixNode * copy = NULL;
-
-    if (node == NULL) {
-        return NULL;
-    }
-
-    copy = (AffixNode *)shalloc(offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
-    memcpy(copy, node, offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
-
-    for (i = 0; i < node->length; i++) {
-
-        copy->data[i].node = copyAffixNode(node->data[i].node);
-
-        copy->data[i].val = node->data[i].val;
-        copy->data[i].naff = node->data[i].naff;
-        copy->data[i].aff = (AFFIX**)shalloc(sizeof(AFFIX*) * node->data[i].naff);
-
-        for (j = 0; j < node->data[i].naff; j++) {
-            copy->data[i].aff[j] = copyAffix(node->data[i].aff[j]);
-        }
-    }
-
-    return copy;
-}
-
-static
-int sizeAffixNode(AffixNode * node) {
-
-    int i, j;
-    int size = 0;
-
-    if (node == NULL) {
-        return 0;
-    }
-
-    size = MAXALIGN(offsetof(AffixNode,data) + sizeof(AffixNodeData) * node->length);
-
-    for (i = 0; i < node->length; i++) {
-
-        size += sizeAffixNode(node->data[i].node);
-        size += MAXALIGN(sizeof(AFFIX*) * node->data[i].naff);
-
-        for (j = 0; j < node->data[i].naff; j++) {
-            size += sizeAffix(node->data[i].aff[j]);
-        }
-    }
-
-    return size;
-}
-
 /* StopList */
 
 static
@@ -932,13 +826,6 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
     strcpy(copy->dictFile, dictFile);
     strcpy(copy->affixFile, affixFile);
 
-    copy->naffixes = dict->naffixes;
-
-    copy->Affix = (AFFIX*)shalloc(sizeof(AFFIX) * dict->naffixes);
-
-    copy->Suffix = copyAffixNode(dict->Suffix);
-    copy->Prefix = copyAffixNode(dict->Prefix);
-
     copy->Dictionary = copySPNode(dict->Dictionary);
 
     /* copy affix data */
@@ -958,6 +845,11 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
 
     copy->nbytes = size;
     copy->nwords = words;
+    
+    /* use the affixes directly (no copy, we'll reload it anyway to handle regular expressions) */
+    copy->naffixes = dict->naffixes;
+    copy->Suffix = dict->Suffix;
+    copy->Prefix = dict->Prefix;
 
     return copy;
 
@@ -974,11 +866,6 @@ int sizeIspellDict(IspellDict * dict, char * dictFile, char * affixFile) {
 
     size += MAXALIGN(strlen(dictFile)+1);
     size += MAXALIGN(strlen(affixFile)+1);
-
-    size += MAXALIGN(sizeof(AFFIX) * dict->naffixes);
-
-    size += MAXALIGN(sizeAffixNode(dict->Suffix));
-    size += MAXALIGN(sizeAffixNode(dict->Prefix));
 
     size += sizeSPNode(dict->Dictionary);
 
