@@ -335,6 +335,8 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 
     /* load the dictionary / affixes if not yet defined */
     if (shdict == NULL) {
+        
+        elog(WARNING, "shdict not found");
 
         dict = (IspellDict *)palloc0(sizeof(IspellDict));
 
@@ -369,8 +371,10 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 
     } else {
         
+        /* local copy, so that we can change the pointers */
+        SharedIspellDict * shdict_local = NULL;
+        
         /* we got the dictionary, but we need to reload the affixes (to handle regex_t rules) */
-
         dict = (IspellDict *)palloc0(sizeof(IspellDict));
 
         NIStartBuild(dict);
@@ -385,6 +389,14 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
         NISortAffixes(dict);
 
         NIFinishBuild(dict);
+        
+        /* now, we need to create a local copy of the shared dictionary, so that we can modify the
+         * pointers locally (without breaking the other backends) */
+        shdict_local = (SharedIspellDict*)palloc(sizeof(SharedIspellDict));
+        memcpy(shdict_local, shdict, sizeof(SharedIspellDict));
+        
+        /* keep the local only */
+        shdict = shdict_local;
         
         shdict->Suffix = dict->Suffix;
         shdict->Prefix = dict->Prefix;
