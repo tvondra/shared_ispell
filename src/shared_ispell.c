@@ -335,8 +335,6 @@ void init_shared_dict(DictInfo * info, char * dictFile, char * affFile, char * s
 
     /* load the dictionary / affixes if not yet defined */
     if (shdict == NULL) {
-        
-        elog(WARNING, "shdict not found");
 
         dict = (IspellDict *)palloc0(sizeof(IspellDict));
 
