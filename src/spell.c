@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "tsearch/ts_locale.h"
 
 #include "spell.h"
 
@@ -24,8 +25,160 @@
 
 #define GETWCHAR(W,L,N,T) ( ((const uint8*)(W))[ ((T)==FF_PREFIX) ? (N) : ( (L) - 1 - (N) ) ] )
 
+
+/*
+ * Gets an affix flag from the set of affix flags (sflagset).
+ *
+ * Several flags can be stored in a single string. Flags can be represented by:
+ * - 1 character (FM_CHAR). A character may be Unicode.
+ * - 2 characters (FM_LONG). A character may be Unicode.
+ * - numbers from 1 to 65000 (FM_NUM).
+ *
+ * Depending on the flagMode an affix string can have the following format:
+ * - FM_CHAR: ABCD
+ *	 Here we have 4 flags: A, B, C and D
+ * - FM_LONG: ABCDE*
+ *	 Here we have 3 flags: AB, CD and E*
+ * - FM_NUM: 200,205,50
+ *	 Here we have 3 flags: 200, 205 and 50
+ *
+ * Conf: current dictionary.
+ * sflagset: the set of affix flags. Returns a reference to the start of a next
+ *			 affix flag.
+ * sflag: returns an affix flag from sflagset.
+ */
+static void
+getNextFlagFromString(SharedIspellDict *Conf, char **sflagset, char *sflag)
+{
+	int32		s;
+	char	   *next,
+			   *sbuf = *sflagset;
+	int			maxstep;
+	bool		stop = false;
+	bool		met_comma = false;
+
+	maxstep = (Conf->flagMode == FM_LONG) ? 2 : 1;
+
+	while (**sflagset)
+	{
+		switch (Conf->flagMode)
+		{
+			case FM_LONG:
+			case FM_CHAR:
+				COPYCHAR(sflag, *sflagset);
+				sflag += pg_mblen(*sflagset);
+
+				/* Go to start of the next flag */
+				*sflagset += pg_mblen(*sflagset);
+
+				/* Check if we get all characters of flag */
+				maxstep--;
+				stop = (maxstep == 0);
+				break;
+			case FM_NUM:
+				s = strtol(*sflagset, &next, 10);
+				if (*sflagset == next || errno == ERANGE)
+					ereport(ERROR,
+							(errcode(ERRCODE_CONFIG_FILE_ERROR),
+							 errmsg("invalid affix flag \"%s\"", *sflagset)));
+				if (s < 0 || s > FLAGNUM_MAXSIZE)
+					ereport(ERROR,
+							(errcode(ERRCODE_CONFIG_FILE_ERROR),
+							 errmsg("affix flag \"%s\" is out of range",
+									*sflagset)));
+				sflag += sprintf(sflag, "%0d", s);
+
+				/* Go to start of the next flag */
+				*sflagset = next;
+				while (**sflagset)
+				{
+					if (t_isdigit(*sflagset))
+					{
+						if (!met_comma)
+							ereport(ERROR,
+									(errcode(ERRCODE_CONFIG_FILE_ERROR),
+									 errmsg("invalid affix flag \"%s\"",
+											*sflagset)));
+						break;
+					}
+					else if (t_iseq(*sflagset, ','))
+					{
+						if (met_comma)
+							ereport(ERROR,
+									(errcode(ERRCODE_CONFIG_FILE_ERROR),
+									 errmsg("invalid affix flag \"%s\"",
+											*sflagset)));
+						met_comma = true;
+					}
+					else if (!t_isspace(*sflagset))
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_CONFIG_FILE_ERROR),
+							 errmsg("invalid character in affix flag \"%s\"",
+									*sflagset)));
+					}
+
+					*sflagset += pg_mblen(*sflagset);
+				}
+				stop = true;
+				break;
+			default:
+				elog(ERROR, "unrecognized type of Conf->flagMode: %d",
+					 Conf->flagMode);
+		}
+
+		if (stop)
+			break;
+	}
+
+	if (Conf->flagMode == FM_LONG && maxstep > 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("invalid affix flag \"%s\" with \"long\" flag value",
+						sbuf)));
+
+	*sflag = '\0';
+}
+
+
+
+/*
+ * Checks if the affix set Conf->AffixData[affix] contains affixflag.
+ * Conf->AffixData[affix] does not contain affixflag if this flag is not used
+ * actually by the .dict file.
+ *
+ * Conf: current dictionary.
+ * affix: index of the Conf->AffixData array.
+ * affixflag: the affix flag.
+ *
+ * Returns true if the string Conf->AffixData[affix] contains affixflag,
+ * otherwise returns false.
+ */
+static bool
+IsAffixFlagInUse(SharedIspellDict *Conf, int affix, char *affixflag)
+{
+	char	   *flagcur;
+	char		flag[BUFSIZ];
+
+	if (*affixflag == 0)
+		return true;
+
+	flagcur = Conf->AffixData[affix];
+
+	while (*flagcur)
+	{
+		getNextFlagFromString(Conf, &flagcur, flag);
+		/* Compare first affix flag in flagcur with affixflag */
+		if (strcmp(flag, affixflag) == 0)
+			return true;
+	}
+
+	/* Could not find affixflag */
+	return false;
+}
+
 static int
-FindWord(SharedIspellDict *Conf, const char *word, int affixflag, int flag)
+FindWord(SharedIspellDict *Conf, const char *word, char *affixflag, int flag)
 {
 	SPNode	   *node = Conf->Dictionary;
 	SPNodeData *StopLow,
@@ -33,7 +186,7 @@ FindWord(SharedIspellDict *Conf, const char *word, int affixflag, int flag)
 			   *StopMiddle;
 	const uint8 *ptr = (const uint8 *) word;
 
-	flag &= FF_DICTFLAGMASK;
+	flag &= FF_COMPOUNDFLAGMASK;
 
 	while (node && *ptr)
 	{
@@ -54,7 +207,11 @@ FindWord(SharedIspellDict *Conf, const char *word, int affixflag, int flag)
 					else if ((flag & StopMiddle->compoundflag) == 0)
 						return 0;
 
-					if ((affixflag == 0) || (strchr(Conf->AffixData[StopMiddle->affix], affixflag) != NULL))
+					/*
+					 * Check if this affix rule is presented in the affix set
+					 * with index StopMiddle->affix.
+					 */
+					if (IsAffixFlagInUse(Conf, StopMiddle->affix, affixflag))
 						return 1;
 				}
 				node = StopMiddle->node;
@@ -307,7 +464,7 @@ NormalizeSubWord(SharedIspellDict *Conf, char *word, int flag)
 						if (CheckAffix(newword, swrdlen, prefix->aff[j], flag, pnewword, &baselen))
 						{
 							/* prefix success */
-							int			ff = (prefix->aff[j]->flagflags & suffix->aff[i]->flagflags & FF_CROSSPRODUCT) ?
+							char *ff = (prefix->aff[j]->flagflags & suffix->aff[i]->flagflags & FF_CROSSPRODUCT) ?
 							0 : prefix->aff[j]->flag;
 
 							if (FindWord(Conf, pnewword, ff, flag))

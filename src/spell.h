@@ -47,10 +47,12 @@ typedef struct SharedIspellDict
 	int			lenAffixData;	/* length of the affix array */
 	int			nAffixData;		/* number of affix data items */
 
+	bool		useFlagAliases;
+
 	CMPDAffix  * CompoundAffix;
 
-	unsigned char flagval[256];
 	bool		usecompound;
+	FlagMode	flagMode;
 	
 } SharedIspellDict;
 

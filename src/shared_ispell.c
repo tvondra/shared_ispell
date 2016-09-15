@@ -73,12 +73,13 @@
 #include "commands/defrem.h"
 #include "tsearch/ts_locale.h"
 #include "storage/lwlock.h"
+#include "storage/shmem.h"
 #include "utils/timestamp.h"
 #include "access/htup_details.h"
 
 #include "funcapi.h"
 
-#include "libpq/md5.h"
+// #include "libpq/md5.h"
 
 #include "spell.h"
 #include "tsearch/dicts/spell.h"
@@ -111,7 +112,7 @@ void        _PG_fini(void);
 /* used to allocate memory in the shared segment */
 typedef struct SegmentInfo {
 
-    LWLockId    lock;
+    LWLock      *lock;
     char        *firstfree;        /* first free address (always maxaligned) */
     size_t        available;        /* free space remaining at firstfree */
     Timestamp    lastReset;        /* last reset of the dictionary */
@@ -188,7 +189,7 @@ _PG_init(void)
      * resources in ispell_shmem_startup().
      */
     RequestAddinShmemSpace(max_ispell_mem_size);
-    RequestAddinLWLocks(1);
+    RequestNamedLWLockTranche("shared_ispell", 1);
 
     /* Install hooks. */
     prev_shmem_startup_hook = shmem_startup_hook;
@@ -242,7 +243,7 @@ void ispell_shmem_startup() {
 
         segment_info = (SegmentInfo*)segment;
 
-        segment_info->lock  = LWLockAssign();
+        segment_info->lock = &(GetNamedLWLockTranche("shared_ispell"))->lock;
         segment_info->firstfree = segment + MAXALIGN(sizeof(SegmentInfo));
         segment_info->available = max_ispell_mem_size - (int)(segment_info->firstfree - segment);
 
@@ -953,7 +954,6 @@ SharedIspellDict * copyIspellDict(IspellDict * dict, char * dictFile, char * aff
     copy->CompoundAffix = (CMPDAffix*)shalloc(sizeof(CMPDAffix) * cnt);
     memcpy(copy->CompoundAffix, dict->CompoundAffix, sizeof(CMPDAffix) * cnt);
 
-    memcpy(copy->flagval, dict->flagval, 255);
     copy->usecompound = dict->usecompound;
 
     copy->nbytes = size;
